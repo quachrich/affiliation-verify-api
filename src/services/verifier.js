@@ -143,9 +143,9 @@ function scoreResults(results, name, institution) {
   const flags = [];
 
   const weights = {
-    clinicalTrials: 0.40,
+    clinicalTrials: 0.30,
     nihGrants: 0.25,
-    pubmed: 0.20,
+    pubmed: 0.30,
     orcid: 0.15
   };
 
@@ -170,7 +170,7 @@ function scoreResults(results, name, institution) {
   }
 
   if (results.pubmed?.found) {
-    const pubWeight = weights.pubmed * Math.min(results.pubmed.publicationCount / 5, 1.0);
+    const pubWeight = weights.pubmed * Math.min(results.pubmed.publicationCount / 3, 1.0);
     score += pubWeight;
     evidence.push({
       source: 'PubMed',
