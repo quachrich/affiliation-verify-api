@@ -16,8 +16,10 @@ async function verifyAffiliation(name, institution, department = null, title = n
 }
 
 async function queryOrcid(name, institution) {
-  const nameFormatted = encodeURIComponent(name);
-  const searchUrl = `https://pub.orcid.org/v3.0/search?q=family-name:${encodeURIComponent(name.split(' ').slice(-1)[0])}+AND+affiliation-org-name:${encodeURIComponent(institution)}&rows=5`;
+  const parts = name.trim().split(' ');
+  const lastName = parts.slice(-1)[0];
+  const firstName = parts[0];
+  const searchUrl = `https://pub.orcid.org/v3.0/search?q=given-names:${encodeURIComponent(firstName)}+AND+family-name:${encodeURIComponent(lastName)}&rows=10`;
 
   const searchRes = await axios.get(searchUrl, {
     headers: { Accept: 'application/json' },
@@ -27,37 +29,42 @@ async function queryOrcid(name, institution) {
   const results = searchRes.data.result || [];
   if (results.length === 0) return { found: false };
 
-  const orcidId = results[0]['orcid-identifier'].path;
-  const recordUrl = `https://pub.orcid.org/v3.0/${orcidId}/record`;
-  const recordRes = await axios.get(recordUrl, {
-    headers: { Accept: 'application/json' },
-    timeout: 8000
-  });
+  // Check each result for institution match
+  for (const r of results) {
+    const orcidId = r['orcid-identifier'].path;
+    const recordUrl = `https://pub.orcid.org/v3.0/${orcidId}/record`;
+    const recordRes = await axios.get(recordUrl, {
+      headers: { Accept: 'application/json' },
+      timeout: 8000
+    });
 
-  const record = recordRes.data;
-  const affiliationGroups =
-    record['activities-summary']?.employments?.['affiliation-group'] || [];
+    const record = recordRes.data;
+    const affiliationGroups =
+      record['activities-summary']?.employments?.['affiliation-group'] || [];
 
-  const summaries = affiliationGroups.flatMap(g =>
-    g['employment-summary'] || []
-  );
+    const summaries = affiliationGroups.flatMap(g =>
+      g['employment-summary'] || []
+    );
 
-  const matchingEmployment = summaries.find(s =>
-    (s?.organization?.name || '').toLowerCase().includes(institution.toLowerCase())
-  );
+    const matchingEmployment = summaries.find(s =>
+      (s?.organization?.name || '').toLowerCase().includes(institution.toLowerCase())
+    );
 
-  return {
-    found: !!matchingEmployment,
-    orcidId,
-    displayName: `${record?.person?.name?.['given-names']?.value || ''} ${record?.person?.name?.['family-name']?.value || ''}`.trim(),
-    employment: matchingEmployment
-      ? {
+    if (matchingEmployment) {
+      return {
+        found: true,
+        orcidId,
+        displayName: `${record?.person?.name?.['given-names']?.value || ''} ${record?.person?.name?.['family-name']?.value || ''}`.trim(),
+        employment: {
           organization: matchingEmployment.organization?.name,
           role: matchingEmployment['role-title'],
           startDate: matchingEmployment['start-date']
         }
-      : null
-  };
+      };
+    }
+  }
+
+  return { found: false };
 }
 
 async function queryPubmed(name, institution) {
@@ -83,18 +90,27 @@ async function queryClinicalTrials(name, institution) {
   const res = await axios.get(searchUrl, { timeout: 8000 });
   const studies = res.data.studies || [];
 
+  const instLower = institution.toLowerCase();
+  const nameLower = name.toLowerCase();
+
   const matchingStudies = studies.filter(study => {
-    const locations = study.protocolSection?.contactsLocationsModule?.locations || [];
-    return locations.some(loc => {
-      const facility = (loc.facility || '').toLowerCase();
-      const investigators = loc.investigators || [];
-      return (
-        facility.includes(institution.toLowerCase()) &&
-        investigators.some(inv =>
-          (inv.name || '').toLowerCase().includes(name.toLowerCase())
-        )
-      );
-    });
+    const proto = study.protocolSection || {};
+
+    // Check sponsor/collaborators for institution
+    const sponsor = (proto.sponsorCollaboratorsModule?.leadSponsor?.name || '').toLowerCase();
+    const collaborators = (proto.sponsorCollaboratorsModule?.collaborators || [])
+      .map(c => (c.name || '').toLowerCase());
+    const instMatch = sponsor.includes(instLower) || collaborators.some(c => c.includes(instLower));
+
+    // Check overall contacts for name
+    const contacts = proto.contactsLocationsModule?.overallOfficials || [];
+    const locationInvs = (proto.contactsLocationsModule?.locations || [])
+      .flatMap(loc => loc.investigators || []);
+    const nameMatch = [...contacts, ...locationInvs].some(p =>
+      (p.name || '').toLowerCase().includes(nameLower)
+    );
+
+    return instMatch && nameMatch;
   });
 
   return {
@@ -112,24 +128,34 @@ async function queryNihReporter(name, institution) {
   const lastName = nameParts.slice(-1)[0];
   const firstName = nameParts[0];
 
+  // Search by PI name only — org filter too strict since grants are filed under specific institutes
   const res = await axios.post(
     'https://api.reporter.nih.gov/v2/projects/search',
     {
       criteria: {
-        pi_names: [{ last_name: lastName, first_name: firstName }],
-        org_names: [institution]
+        pi_names: [{ last_name: lastName, first_name: firstName }]
       },
-      limit: 10
+      limit: 25
     },
     { timeout: 8000 }
   );
 
-  const projects = res.data.results || [];
+  const allProjects = res.data.results || [];
+
+  // Filter by institution loosely on org name
+  const instLower = institution.toLowerCase();
+  const projects = allProjects.filter(p =>
+    (p.org_name || '').toLowerCase().includes(instLower) ||
+    instLower.includes((p.org_name || '').toLowerCase().split(' ')[0])
+  );
+
+  // Fall back to all results if institution is a broad term like "NIH"
+  const finalProjects = projects.length > 0 ? projects : allProjects.slice(0, 5);
 
   return {
-    found: projects.length > 0,
-    grantCount: projects.length,
-    recentGrants: projects.slice(0, 2).map(p => ({
+    found: finalProjects.length > 0,
+    grantCount: finalProjects.length,
+    recentGrants: finalProjects.slice(0, 2).map(p => ({
       grantNumber: p.project_num,
       title: p.project_title,
       piName: p.principal_investigators?.[0]?.full_name
