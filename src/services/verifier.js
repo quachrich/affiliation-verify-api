@@ -42,8 +42,9 @@ async function queryOrcid(name, institution) {
     const affiliationGroups =
       record['activities-summary']?.employments?.['affiliation-group'] || [];
 
+    // Employment is nested under summaries[].employment-summary in the full record
     const summaries = affiliationGroups.flatMap(g =>
-      g['employment-summary'] || []
+      (g.summaries || []).map(s => s['employment-summary']).filter(Boolean)
     );
 
     const matchingEmployment = summaries.find(s =>
